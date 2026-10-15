@@ -57,8 +57,6 @@ from .policy_integrity import (
     REMOTE_POLICY_SOURCES,
     PolicyIntegrityVerificationResult,
     is_remote_policy_source,
-    sign_local_policy_row,
-    verify_local_policy_row,
 )
 from .runtime.actions import GuardActionEnvelope
 from .runtime.approval_context import parse_approval_context_token
@@ -74,10 +72,10 @@ from .sqlite_tuning import (
 from .store_approvals import (
     _json_object,
     _json_object_list,
-    approval_request_surfaces_are_resolvable,
     approval_index_statements,
     approval_schema_statement,
     backfill_approval_queue_columns,
+    resolvable_approval_request_ids,
 )
 from .store_approval_writes import (
     add_approval_request as persist_approval_request,
@@ -119,16 +117,8 @@ from .store_approvals import (
     resolve_request_with_queue_result as persist_queue_resolution,
 )
 from .store_connect import (
-    build_connect_state_response,
     connect_request_schema_statement,
     connect_state_schema_statement,
-    load_connect_state,
-)
-from .store_connect import (
-    get_latest_connect_state as load_latest_connect_state,
-)
-from .store_connect import (
-    mark_connect_result as persist_connect_result,
 )
 from .store_review_event_outbox_binding import bind_review_events_for_request
 from .store_evidence import (
@@ -140,11 +130,6 @@ from .store_evidence import (
 )
 from .store_evidence import (
     store_evidence as _store_evidence_impl,
-)
-from .store_policy_source_context import (
-    PolicySourceContextIndex,
-    build_policy_source_context_index,
-    lookup_policy_source_context,
 )
 from .store_receipt_rollup_schema import receipt_rollup_index_statements, receipt_rollup_schema_statements
 from .store_resume import (
@@ -169,18 +154,12 @@ from .store_supply_chain import (
     get_supply_chain_bundle as load_supply_chain_bundle,
 )
 from .store_supply_chain import (
-    get_supply_chain_evaluation as load_supply_chain_evaluation,
-)
-from .store_supply_chain import (
     supply_chain_bundle_schema_statement,
     supply_chain_eval_cache_schema_statement,
     supply_chain_index_statements,
 )
 from .store_supply_chain import (
     upsert_supply_chain_bundle as persist_supply_chain_bundle,
-)
-from .store_supply_chain import (
-    upsert_supply_chain_evaluation as persist_supply_chain_evaluation,
 )
 from .store_threat_intel import (
     threat_intel_bundle_schema_statement,

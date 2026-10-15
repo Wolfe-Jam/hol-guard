@@ -57,7 +57,20 @@ def test_macos_skill_identity_consumes_the_ci_runtime() -> None:
         for step in load_ci_workflow()["jobs"]["cross-platform"]["steps"]
         if step.get("name") == "Run cross-platform skill-directory identity regressions"
     )
-    assert _pytest_files(steps[regression]) == _pytest_files(windows_step) != []
+    windows_files = _pytest_files(windows_step)
+    macos_files = _pytest_files(steps[regression])
+    # Adapter and AIBOM discovery run in the native resident, which only the
+    # macOS lane builds; every other file must match the Windows lane exactly.
+    native_only = {
+        "tests/test_gemini_adapter.py",
+        "tests/test_gemini_skill_directory_identity.py",
+        "tests/test_antigravity_adapter.py",
+        "tests/test_guard_aibom_detection.py",
+        "tests/test_guard_aibom_skill_directory_identity.py",
+    }
+    assert windows_files != []
+    assert [name for name in macos_files if name not in native_only] == windows_files
+    assert native_only <= set(macos_files)
 
 
 def test_required_aggregate_includes_the_macos_native_lane() -> None:
@@ -66,9 +79,27 @@ def test_required_aggregate_includes_the_macos_native_lane() -> None:
     required = workflow["jobs"]["required"]
     assert "macos-native-runtime" in required["needs"]
     assert "macos-skill-identity" in required["needs"]
+    assert "macos-gates" in required["needs"]
     run = "\n".join(step.get("run", "") for step in required["steps"])
     lane_gated = re.search(r"required\s*=\s*(\[[^]]*\])", run)
     assert lane_gated is not None
     gated = ast.literal_eval(lane_gated.group(1))
     assert "macos-native-runtime" in gated
     assert "macos-skill-identity" in gated
+    assert "macos-gates" in gated
+
+
+def test_macos_gates_run_the_benign_and_replay_gates_on_the_ci_runtime() -> None:
+    """Run the false-positive gates against the macOS runtime, not only on Linux."""
+    job = load_ci_workflow()["jobs"]["macos-gates"]
+    needs = job["needs"] if isinstance(job["needs"], list) else [job["needs"]]
+    assert {"native-command-evaluators", "macos-native-runtime"} <= set(needs)
+    steps = job["steps"]
+    expose = step_index(steps, "Expose the CI-built macOS runtime")
+    gates = step_index(steps, "Benign false-positive and Gauntlet replay gates on macOS")
+    assert expose < gates
+    assert set(_pytest_files(steps[gates])) == {
+        "tests/test_guard_benign_false_positive_gate.py",
+        "tests/test_guard_gauntlet_replay_gate.py",
+        "tests/test_guard_command_corpus_benign_allow.py",
+    }

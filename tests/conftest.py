@@ -76,6 +76,70 @@ def _default_unit_test_native_mode(monkeypatch: pytest.MonkeyPatch) -> bool:
 
 
 @pytest.fixture(autouse=True)
+def _python_codex_hook_bridge(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Install Codex hooks with the Python bridge argv unless a test opts in.
+
+    Most Codex install and trust tests pin the Python bridge contract. Tests
+    marked ``native_codex_hook_bridge`` keep the native runtime selection.
+    """
+
+    if request.node.get_closest_marker("native_codex_hook_bridge") is not None:
+        return
+    from codex_plugin_scanner.guard.adapters import codex as codex_adapter
+
+    # Subprocess installers copy os.environ and do not see this monkeypatch.
+    # The adapter treats this value as the Python bridge pin.
+    monkeypatch.setenv("HOL_GUARD_CODEX_HOOK_BRIDGE", "python")
+    monkeypatch.setattr(codex_adapter, "_native_bridge_executable", lambda: None)
+
+
+@pytest.fixture(autouse=True)
+def _python_bounded_hook_bridge(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Install bounded CLI hooks with the Python bridge argv unless a test opts in.
+
+    Copilot, Kimi, Devin, ZCode, OpenClaw and Cursor install tests pin the
+    Python bridge contract. Tests marked ``native_bounded_hook_bridge`` keep the
+    native runtime selection.
+    """
+
+    if request.node.get_closest_marker("native_bounded_hook_bridge") is not None:
+        return
+    # Subprocess installers copy os.environ and do not see a monkeypatched
+    # function. The launcher treats this value as the Python bridge pin.
+    monkeypatch.setenv("HOL_GUARD_BOUNDED_HOOK_BRIDGE", "python")
+    monkeypatch.setenv("HOL_GUARD_CURSOR_HOOK_BRIDGE", "python")
+
+
+@pytest.fixture(autouse=True)
+def _python_mcp_proxy_launcher(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Install MCP proxies with the Python launcher argv unless a test opts in.
+
+    Most install and refresh tests pin the Python proxy entry. Relay tests
+    select the native relay by setting or clearing ``HOL_GUARD_MCP_RELAY``.
+    """
+
+    # Subprocess installers copy os.environ, so the pin is an environment value.
+    monkeypatch.setenv("HOL_GUARD_MCP_RELAY", "python")
+
+
+@pytest.fixture(autouse=True)
+def _reset_registry_cache() -> None:
+    """A registry document one test cached must not answer another test."""
+    from codex_plugin_scanner.guard.native_supply_chain_registry_cache import REGISTRY_CACHE
+
+    REGISTRY_CACHE.clear()
+
+
+@pytest.fixture(autouse=True)
+def _reset_aibom_mcp_native_backoff() -> None:
+    """One outage's MCP-enrichment backoff must not leak into the next test."""
+
+    from codex_plugin_scanner.guard import aibom_detection
+
+    aibom_detection._mcp_native_backoff_until = 0.0
+
+
+@pytest.fixture(autouse=True)
 def _default_off_daemon_route_policy(
     request: pytest.FixtureRequest,
     _default_unit_test_native_mode: bool,

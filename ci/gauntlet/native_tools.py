@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import posixpath
+import re
 import shutil
 from pathlib import Path
 from typing import Any
@@ -11,13 +12,33 @@ from typing import Any
 from .catalog import Scenario
 from .command_outputs import _text
 from .input_evidence import post_input_matches
+from .proofs import _edit_path, _path
+from .review_fixtures import WORKTREE_CASE, WORKTREE_NAME
 
 PRIVATE_TEMP_ROOTS = ("/tmp/", "/private/tmp/", "/var/folders/", "/private/var/folders/")
+# Git Bash ``mktemp -d`` on Windows prints a directory in the fixture profile's
+# own temp folder, redacted and written with backslashes.
+WINDOWS_TEMP_ROOT = "{{home}}/AppData/Local/Temp/"
 SCRATCH_NAME = "scratch-notes.txt"
 
 
 def _write_path(args: dict[str, Any]) -> str:
     return str(args.get("path", args.get("file_path", "")))
+
+
+def _profile_temp_path(text: str) -> str | None:
+    """Return a Windows profile-temp path in forward-slash form, or None.
+
+    Only paths strictly below the redacted profile temp folder qualify; a
+    parent step, a stream or drive colon, or mixed separators are refused.
+    """
+    if "/" in text or not text.startswith("{{home}}\\"):
+        return None
+    spelled = text.replace("\\", "/")
+    rest = spelled.removeprefix(WINDOWS_TEMP_ROOT)
+    if rest == spelled or not rest or ":" in rest or ".." in rest.split("/"):
+        return None
+    return posixpath.normpath(spelled)
 
 
 def _created_directory(result: Any) -> str | None:
@@ -31,7 +52,11 @@ def _created_directory(result: Any) -> str | None:
     if text is None:
         return None
     lines = text.strip().splitlines()
-    if len(lines) != 1 or not lines[0].startswith("/") or ".." in lines[0].split("/"):
+    if len(lines) != 1:
+        return None
+    if not lines[0].startswith("/"):
+        return _profile_temp_path(lines[0])
+    if ".." in lines[0].split("/"):
         return None
     return posixpath.normpath(lines[0])
 
@@ -43,10 +68,43 @@ def _temp_write_error(calls: list[dict[str, Any]]) -> str | None:
         return "the private temporary directory was not created exactly once"
     target = posixpath.join(created[0], SCRATCH_NAME)
     writes = [_write_path(c["args"]) for c in calls if c["name"] == "write"]
+    if created[0].startswith(WINDOWS_TEMP_ROOT):
+        writes = [_profile_temp_path(path) or path for path in writes]
     if len(writes) < 2:
         return "the model did not overwrite the scratch file"
     if any(".." in path.split("/") or posixpath.normpath(path) != target for path in writes):
         return "the model wrote outside the private temporary directory"
+    return None
+
+
+def _linked_worktree_error(calls: list[dict[str, Any]], *, require_steps: bool = True) -> str | None:
+    """Hold every file call to the worktree and, with ``require_steps``, require the requested steps.
+
+    The steps are: read, edit and read back its settings, and write its note.
+    """
+    root = f"{{{{home}}}}/{WORKTREE_NAME}/"
+    settings, note = f"{root}src/settings.ts", f"{root}docs/change.md"
+    steps: list[tuple[str, str]] = []
+    for call in calls:
+        name = call["name"]
+        if name not in {"read", "edit", "write"}:
+            continue
+        path = _edit_path(call["args"]) if name == "edit" else _path(call["args"])
+        if path is None or not path.startswith(root) or ".." in path.split("/"):
+            return "the model used a file outside the linked worktree"
+        if name == "read":
+            path = re.sub(r":\d+(-\d+)?$", "", path)
+        if (name == "edit" and path != settings) or (name == "write" and path != note):
+            return "the model changed a different worktree file"
+        steps.append((name, path))
+    if not require_steps:
+        return None
+    edits = [index for index, step in enumerate(steps) if step == ("edit", settings)]
+    reads = [index for index, step in enumerate(steps) if step == ("read", settings)]
+    if not edits or ("write", note) not in steps:
+        return "the model did not edit the worktree settings and write its note"
+    if not reads or reads[0] > edits[0] or reads[-1] < edits[-1]:
+        return "the model did not read the worktree settings before and after editing"
     return None
 
 
@@ -110,18 +168,21 @@ def native_tools_scope_error(
                     return "delegated result report contained extra operations"
                 files = data.get("files", [])
                 if not isinstance(files, list) or any(
-                    not isinstance(file, dict) or file.get("path") not in delegated_paths
-                    for file in files
+                    not isinstance(file, dict) or file.get("path") not in delegated_paths for file in files
                 ):
                     return "delegated report referenced an unexpected file"
         else:
             return "delegated work used an unexpected tool"
     if any(call["name"] not in allowed for call in calls if call["id"] not in set(delegated) | bridged):
         return "the model used a tool outside the scenario"
-    listed = set(scenario.commands)
+    # Evidence names the fixture root `{{fixture}}`; the catalog spells it `{{root}}` so
+    # the prompt a model reads does not frame ordinary work as a fixture.
+    listed = {command.replace("{{root}}", "{{fixture}}") for command in scenario.commands}
     for call in calls:
         if call["name"] == "bash" and call["args"].get("command") not in listed:
             return "the model ran a shell command the scenario did not list"
+    if scenario.id == WORKTREE_CASE and (scope := _linked_worktree_error(calls, require_steps=False)):
+        return scope
     if guard_denied:
         return None
     if not set(scenario.required_tools) <= {call["name"] for call in calls}:
@@ -133,6 +194,8 @@ def native_tools_scope_error(
         return "the shell commands were omitted or unexpected"
     if "private-temp-write" in scenario.id:
         return _temp_write_error(calls)
+    if scenario.id == WORKTREE_CASE:
+        return _linked_worktree_error(calls)
     return None
 
 

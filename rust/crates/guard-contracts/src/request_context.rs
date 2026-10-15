@@ -162,12 +162,22 @@ pub struct ShellContextV1 {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", content = "body", rename_all = "snake_case")]
 pub enum RequestContextKindV1 {
+    /// Compile unverified portable source and report policy-change semantics.
+    PolicyDocument(RequestContextPolicyDocumentV1),
+    /// Native sensitivity and structured-output authority over bounded content.
+    ContentSensitivity(RequestContextContentSensitivityV1),
+    RestrictedPytest {
+        operation: String,
+        input: Value,
+    },
     /// Rebuild monotonic command floors without workflow authorization grants.
     CriticalFloor(RequestContextCriticalFloorV1),
     /// Admit the request and build the whole canonical context.
     Build(RequestContextBuildV1),
     DirectTool(RequestContextDirectToolV1),
     TrustedTool(RequestContextTrustedToolV1),
+    /// Classify a tool call or path against the sensitive-request rules.
+    SensitiveRequest(RequestContextSensitiveRequestV1),
     /// Re-read the filesystem and prove one modeled segment is unchanged.
     /// The supplied context is a claim; the filesystem is the authority.
     ValidateSegment {
@@ -180,6 +190,13 @@ pub enum RequestContextKindV1 {
         #[serde(default)]
         segment_index: Option<u64>,
     },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RequestContextPolicyDocumentV1 {
+    pub query: String,
+    pub input: Value,
 }
 
 /// Caller observations; verdicts and file identities are rebuilt natively.
@@ -228,12 +245,35 @@ pub struct RequestContextTrustedToolV1 {
     pub facts: RequestContextDirectFactsV1,
 }
 
+/// One sensitive-request classifier query over the caller's observed facts.
+///
+/// `git_executable` and `control_snapshot` are observations, not verdicts:
+/// the resident re-proves git trust and derives control authority itself.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RequestContextSensitiveRequestV1 {
+    pub query: String,
+    pub input: Value,
+    pub facts: RequestContextDirectFactsV1,
+    #[serde(default)]
+    pub git_executable: Option<String>,
+    #[serde(default)]
+    pub control_snapshot: Option<crate::HookControlSnapshotV1>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct RequestContextCriticalFloorV1 {
     pub script: String,
     pub cwd: String,
     pub home_dir: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct RequestContextContentSensitivityV1 {
+    pub query: String,
+    pub input: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

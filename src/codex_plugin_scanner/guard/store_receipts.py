@@ -9,6 +9,7 @@ event, and returns raw rows that are only shaped here.
 
 from __future__ import annotations
 
+import json
 from contextlib import closing
 from datetime import datetime, timezone
 from uuid import uuid4
@@ -18,6 +19,7 @@ from .models import GuardRuntimeRegistration
 # ruff: noqa: F403,F405
 from .store_base import *
 from .store_base import _canonical_utc_timestamp
+from .store_inventory import inventory_artifact_wire
 
 
 def _receipt_wire(receipt: GuardReceipt) -> dict[str, object]:
@@ -61,6 +63,41 @@ class StoreReceiptsRuntimeMixin:
                 "now": _now_iso(),
                 "new_device_id": uuid4().hex,
                 "event_queue_limit": self._guard_event_queue_limit,
+            },
+        )
+
+    def record_tool_call_evidence(
+        self,
+        *,
+        artifact: GuardArtifact,
+        artifact_hash: str,
+        policy_action: GuardAction,
+        approved: bool,
+        receipt: GuardReceipt,
+        event_name: str,
+        event_payload: dict[str, object],
+        now: str,
+    ) -> None:
+        """Write the inventory row, receipt and runtime event in one resident transaction."""
+        self._native_store_call(
+            "record_tool_call_evidence",
+            {
+                "inventory": inventory_artifact_wire(
+                    artifact=artifact,
+                    artifact_hash=artifact_hash,
+                    policy_action=policy_action,
+                    changed=False,
+                    now=now,
+                    approved=approved,
+                ),
+                "receipt": _receipt_wire(receipt),
+                "action_envelope": None,
+                "now": _now_iso(),
+                "new_device_id": uuid4().hex,
+                "event_queue_limit": self._guard_event_queue_limit,
+                "event_name": event_name,
+                "event_payload_json": json.dumps(event_payload),
+                "event_occurred_at": now,
             },
         )
 
@@ -201,18 +238,6 @@ class StoreReceiptsRuntimeMixin:
                   last_heartbeat_at = excluded.last_heartbeat_at
                 """,
                 (session_id, daemon_host, daemon_port, started_at, last_heartbeat_at),
-            )
-
-    def touch_runtime_state(self, *, session_id: str, last_heartbeat_at: str) -> None:
-        with self._connect() as connection:
-            connection.execute(
-                """
-                update guard_runtime_state
-                set last_heartbeat_at = ?
-                where state_key = 'runtime'
-                  and session_id = ?
-                """,
-                (last_heartbeat_at, session_id),
             )
 
     def try_touch_runtime_state(

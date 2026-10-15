@@ -1,7 +1,8 @@
 //! `RunnerAuthority` — resident op owning the `guard run` authority
 //! transforms (see `guard_contracts::runner_authority`).
 //!
-//! Pure (no IO): every kind is a deterministic function of its arguments and
+//! Every kind is a deterministic function of its arguments (the `aibom_*`
+//! kinds also read the workspace files they are pointed at) and
 //! reuses the same authoritative-decision, action-lattice and approval-token
 //! code the rest of the resident runs, so there is one rule set. Python ships
 //! typed inputs, applies the returned patch and never recomputes an action,
@@ -15,9 +16,24 @@ use guard_contracts::{
 use guard_policy_snapshot::digest_bytes;
 use serde_json::Value;
 
+use super::aibom_op as aibom;
+use super::antigravity_detect;
+use super::claude_code_detect;
+use super::codex_detect;
 use super::context_digest_json::write_canonical_json_with_limit;
+use super::copilot_detect;
+use super::cursor_detect;
+use super::devin_detect;
+use super::gemini_detect;
+use super::grok_detect;
+use super::hermes_detect;
+use super::kimi_detect;
 use super::oci_bundle_op as oci;
+use super::openclaw_detect;
+use super::opencode_detect;
+use super::pi_detect;
 use super::runner_authority_signature as signature;
+use super::zcode_detect;
 use super::{
     cloud_receipt_payload as receipt, cloud_request_snapshot as snapshot,
     cloud_sync_privacy as privacy,
@@ -57,6 +73,23 @@ fn request_digest(request: &RunnerAuthorityRequestV1) -> Result<String, &'static
 
 pub(crate) fn dispatch(kind: &str, args: &Value) -> KindResult {
     match kind {
+        "developer_inspection_authority" => {
+            crate::developer_inspection_authority_op::dispatch(args)
+        }
+        "continuation_authority" => crate::continuation_authority_op::evaluate(args),
+        "projection_approval"
+        | "projection_receipt"
+        | "projection_surfaces"
+        | "projection_surfaces_batch"
+        | "projection_artifact_surfaces" => crate::signal_projection_op::dispatch(kind, args),
+        "decision_v2_decode"
+        | "decision_enforcement_decode"
+        | "decision_authoritative_decode"
+        | "decision_artifact_decode"
+        | "decision_legacy"
+        | "decision_build" => crate::decision_authority_op::dispatch(kind, args),
+        "cli_runtime_support" => crate::cli_runtime_support_op::dispatch(args),
+        "shell_request_authority" => crate::shell_request_authority_op::dispatch(args),
         "detector_authority" => detector::detector_authority(args),
         "detector_composition" => detector::detector_composition(args),
         "skill_content_risk" => detector::skill_content_risk(args),
@@ -87,6 +120,24 @@ pub(crate) fn dispatch(kind: &str, args: &Value) -> KindResult {
         "oci_evidence_verdict" => oci::oci_evidence_verdict(args),
         "oci_bundle_digest" => oci::oci_bundle_digest(args),
         "oci_bundle_plan" => oci::oci_bundle_plan(args),
+        "aibom_workspace_artifacts" => aibom::workspace_artifacts(args),
+        "aibom_workspace_plan" => aibom::workspace_merge_plan(args),
+        "aibom_codex_skills" => aibom::codex_skills(args),
+        "aibom_mcp_metadata" => aibom::mcp_metadata(args),
+        "zcode_detect" => zcode_detect::detect(args),
+        "hermes_detect" => hermes_detect::detect(args),
+        "pi_detect" => pi_detect::detect(args),
+        "codex_detect" => codex_detect::detect(args),
+        "copilot_detect" => copilot_detect::detect(args),
+        "claude_code_detect" => claude_code_detect::detect(args),
+        "gemini_detect" => gemini_detect::detect(args),
+        "antigravity_detect" => antigravity_detect::detect(args),
+        "devin_detect" => devin_detect::detect(args),
+        "grok_detect" => grok_detect::detect(args),
+        "kimi_detect" => kimi_detect::detect(args),
+        "openclaw_detect" => openclaw_detect::detect(args),
+        "cursor_detect" => cursor_detect::detect(args),
+        "opencode_detect" => opencode_detect::detect(args),
         _ => Err(ERR_KIND),
     }
 }

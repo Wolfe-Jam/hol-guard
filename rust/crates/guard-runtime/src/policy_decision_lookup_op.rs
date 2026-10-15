@@ -34,6 +34,7 @@ use guard_policy_snapshot::policy_integrity::{
 
 use super::context_digest_json::write_canonical_json_with_limit;
 use crate::claim_reuse::approval_authority_revision;
+use crate::guard_store_json::dumps_sorted;
 
 pub(crate) const LOCAL_ONCE_LEGACY_AUTHORITY_KIND: &str = "legacy";
 const LOCAL_ONCE_INTEGRITY_PURPOSE: &str = "guard-local-once-approval";
@@ -146,6 +147,16 @@ pub(crate) fn workspace_policy_key(workspace: Option<&str>) -> Option<String> {
     if ws.starts_with("workspace:") {
         return Some(ws.to_string());
     }
+    computed_workspace_policy_key(Some(ws))
+}
+
+/// `_workspace_policy_key` (`store_base.py`) exactly: always hashes the
+/// normalized path, with no passthrough for already-keyed input.
+pub(crate) fn computed_workspace_policy_key(workspace: Option<&str>) -> Option<String> {
+    let ws = workspace?;
+    if ws.trim().is_empty() {
+        return None;
+    }
     Some(format!(
         "workspace:{}",
         sha256_hex(normalized_workspace_path(ws).as_bytes())
@@ -158,12 +169,13 @@ fn family_key_value(family_key: &str) -> &str {
 
 /// `_runtime_scoped_exact_match_key` — `runtime-exact:<digest>`; `None` unless
 /// the artifact is a scoped family member.
-fn runtime_scoped_exact_match_key(
+pub(crate) fn runtime_scoped_exact_match_key(
     artifact_id: Option<&str>,
     runtime_exact_match_context: Option<&str>,
 ) -> Option<String> {
-    let id = artifact_id?.trim();
-    if id.is_empty() || id.starts_with("family:") {
+    // Python keys the untrimmed id; only the blank check strips.
+    let id = artifact_id?;
+    if id.trim().is_empty() || id.starts_with("family:") {
         return None;
     }
     let family_key = artifact_family_key(Some(id))?;
@@ -173,11 +185,11 @@ fn runtime_scoped_exact_match_key(
     let digest = match runtime_exact_match_context {
         None => sha256_hex(id.as_bytes()),
         Some(ctx) => sha256_hex(
-            canonical_json(&json!({
+            dumps_sorted(&json!({
                 "artifact_id": id,
                 "context": ctx,
                 "version": 2,
-            }))
+            }))?
             .as_bytes(),
         ),
     };
@@ -190,7 +202,7 @@ fn runtime_scoped_exact_match_key(
 /// broad rule matches the identical executable action across workspaces. Parses
 /// the runtime exact-match context JSON, requires `raw_command_text`, and rebuilds
 /// the canonical context payload with the location fields nulled.
-fn runtime_tool_action_portable_match_context(ctx: Option<&str>) -> Option<String> {
+pub(crate) fn runtime_tool_action_portable_match_context(ctx: Option<&str>) -> Option<String> {
     let ctx = ctx?;
     let payload: Value = serde_json::from_str(ctx).ok()?;
     let payload = payload.as_object()?;
@@ -221,7 +233,7 @@ fn runtime_tool_action_portable_match_context(ctx: Option<&str>) -> Option<Strin
         "wrapper_chain": wrapper_chain.unwrap_or_default(),
         "permission_mode": permission_mode,
     });
-    Some(canonical_json(&context))
+    dumps_sorted(&context)
 }
 
 /// `_global_runtime_scoped_exact_match_key`.
@@ -1318,14 +1330,12 @@ fn evaluate(request: &PolicyDecisionLookupRequestV1) -> Result<Value, String> {
     if request.schema != POLICY_DECISION_LOOKUP_REQUEST_SCHEMA {
         return Err("native_policy_decision_lookup_schema_mismatch".to_owned());
     }
+    if let Some(groups) = &request.probe_groups {
+        return crate::policy_lookup_groups::evaluate(request, groups);
+    }
     let current_time = canonical_utc_timestamp(&request.now)
         .ok_or_else(|| "native_policy_decision_lookup_invalid_now".to_owned())?;
-    let mut conn = Connection::open(&request.store_path)
-        .map_err(|_| "native_policy_decision_lookup_store_unavailable".to_owned())?;
-    conn.busy_timeout(std::time::Duration::from_secs(5))
-        .map_err(|_| "native_policy_decision_lookup_store_unavailable".to_owned())?;
-    conn.execute("pragma foreign_keys = on", [])
-        .map_err(|_| "native_policy_decision_lookup_store_unavailable".to_owned())?;
+    let mut conn = open_lookup_connection(&request.store_path)?;
     if request.consume_one_shot {
         // Serialize selection with consumption. Rollback-on-drop also keeps a
         // one-shot usable when its required audit write or commit fails.
@@ -1340,6 +1350,32 @@ fn evaluate(request: &PolicyDecisionLookupRequestV1) -> Result<Value, String> {
     } else {
         evaluate_in_connection(request, &conn, &current_time)
     }
+}
+
+/// Open the store the way a stand-alone lookup does, for callers that probe it
+/// several times in one request.
+pub(crate) fn open_lookup_connection(store_path: &str) -> Result<Connection, String> {
+    let unavailable = || "native_policy_decision_lookup_store_unavailable".to_owned();
+    let conn = Connection::open(store_path).map_err(|_| unavailable())?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))
+        .map_err(|_| unavailable())?;
+    conn.execute("pragma foreign_keys = on", [])
+        .map_err(|_| unavailable())?;
+    Ok(conn)
+}
+
+/// One non-consuming probe on an already open store: the `lookup_result`
+/// payload a stand-alone `consume_one_shot: false` request would return.
+pub(crate) fn evaluate_non_consuming(
+    request: &PolicyDecisionLookupRequestV1,
+    conn: &Connection,
+) -> Result<Value, String> {
+    if request.consume_one_shot || request.schema != POLICY_DECISION_LOOKUP_REQUEST_SCHEMA {
+        return Err("native_policy_decision_lookup_invalid".to_owned());
+    }
+    let current_time = canonical_utc_timestamp(&request.now)
+        .ok_or_else(|| "native_policy_decision_lookup_invalid_now".to_owned())?;
+    evaluate_in_connection(request, conn, &current_time)
 }
 
 fn evaluate_in_connection(
@@ -1990,4 +2026,4 @@ fn consuming_policy_rows(
 
 #[cfg(test)]
 #[path = "policy_decision_lookup_tests.rs"]
-mod tests;
+pub(crate) mod tests;

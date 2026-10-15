@@ -29,6 +29,12 @@ pub(crate) struct Budget {
 }
 
 impl Budget {
+    pub(crate) fn bounded_milliseconds(milliseconds: u64) -> Self {
+        Self {
+            started: Instant::now(),
+            limit: Duration::from_millis(milliseconds.min(9_000)),
+        }
+    }
     pub(crate) fn check(&self) -> Result<(), &'static str> {
         if self.started.elapsed() >= self.limit {
             return Err(BUDGET_EXCEEDED);
@@ -47,14 +53,22 @@ impl Budget {
     }
 }
 
+#[cfg(test)]
 pub(crate) fn evaluate_request_context_request(
     request: &RequestContextRequestV1,
+) -> Result<Vec<u8>, String> {
+    evaluate_request_context_request_with_store(request, None)
+}
+
+pub(crate) fn evaluate_request_context_request_with_store(
+    request: &RequestContextRequestV1,
+    store: Option<&crate::policy_store::PolicySnapshotStore>,
 ) -> Result<Vec<u8>, String> {
     let request_sha256 = request_digest(request)?;
     if request.schema != REQUEST_CONTEXT_REQUEST_SCHEMA {
         return Err("native_request_context_schema_mismatch".to_owned());
     }
-    let (status, code, payload) = match decide(request) {
+    let (status, code, payload) = match decide(request, store) {
         Ok(payload) => ("ok".to_owned(), "ok".to_owned(), Some(payload)),
         Err(code) => ("error".to_owned(), code.to_owned(), None),
     };
@@ -282,9 +296,24 @@ pub(crate) fn build_with_shell_report(
     }))
 }
 
-fn decide(request: &RequestContextRequestV1) -> Result<Value, &'static str> {
+fn decide(
+    request: &RequestContextRequestV1,
+    store: Option<&crate::policy_store::PolicySnapshotStore>,
+) -> Result<Value, &'static str> {
     let budget = admit(request)?;
     let payload = match &request.action {
+        RequestContextKindV1::PolicyDocument(body) => {
+            crate::policy_document_op::evaluate(body, &budget, &request.guard_home)?
+        }
+        RequestContextKindV1::ContentSensitivity(body) => crate::content_sensitivity_op::evaluate(
+            body,
+            &budget,
+            store,
+            Path::new(&request.guard_home),
+        )?,
+        RequestContextKindV1::RestrictedPytest { operation, input } => {
+            crate::restricted_pytest_op::evaluate(operation, input, &budget)?
+        }
         RequestContextKindV1::CriticalFloor(body) => {
             crate::critical_floor_op::evaluate(body, &budget)?
         }
@@ -294,6 +323,9 @@ fn decide(request: &RequestContextRequestV1) -> Result<Value, &'static str> {
         }
         RequestContextKindV1::TrustedTool(body) => {
             crate::direct_tool_context_op::trusted(body, &budget)?
+        }
+        RequestContextKindV1::SensitiveRequest(body) => {
+            crate::sensitive_request_op::evaluate(request, body, &budget)?
         }
         RequestContextKindV1::ValidateSegment {
             context,

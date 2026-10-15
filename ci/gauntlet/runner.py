@@ -28,24 +28,37 @@ from .case_helpers import (
     _scenario_tools,
     _watch_binding,
     read_case_logs,
+    ready_watch_binding,
 )
 from .case_worker import SubprocessCaseWorker
 from .catalog import WATCH_COMMAND, WATCH_PROMPT, Scenario, catalog_digest, load_catalog
 from .cleanup import cleanup_case_resources
+from .contained_core import request_proofs
 from .evidence import assess_case, sha256_bytes
 from .extension_adapters import configure_extension_permission_denial, extension_adapter
-from .fixtures import create_fixture, create_run_root, digest_file, filesystem_checks, scenario_fixture_name
-from .host_process import clean_environment, run_process
+from .fixtures import (
+    create_fixture,
+    create_run_root,
+    digest_file,
+    filesystem_checks,
+    remove_scratch_checkout,
+    scenario_fixture_name,
+    scratch_checkout,
+)
+from .host_process import clean_environment, realistic_environment, run_process
 from .input_evidence import (
     public_native_extension_evidence,
     public_native_receipt,
 )
+from .interruptions import KNOWN_GAPS, load_known_gaps, report_sections, stale_gaps
 from .latency import summarize_hook_latency
 from .native_tools import cleanup_private_temp
 from .parallel import HostSlots, Lease, LoadGate, run_scheduled, validate_jobs
 from .provider import InferenceRelay, LoopbackCollector
+from .review_fixtures import GITHUB_REVIEW_CASE, GITHUB_STUB_CASES, WORKTREE_CASE, configure_github_review_controls
 from .source_identity import source_identity
 from .summary import inference_usage, render_summary_markdown
+from .supply_chain import stage_supply_chain
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
@@ -65,7 +78,13 @@ def run_case(
     from ci.native_runtime import probe_installed_native_extensions as native_probe
 
     first_contact = scenario.oracle == "native-tools"
-    fixture = create_fixture(root / scenario_fixture_name(scenario.id), realistic=first_contact)
+    fixture = create_fixture(
+        root / scenario_fixture_name(scenario.id),
+        realistic=first_contact and scenario.id != WORKTREE_CASE,
+        linked_worktree=scenario.id == WORKTREE_CASE,
+        scenario_id=scenario.id,
+    )
+    stage_supply_chain(fixture.workspace, scenario.id)
     private = fixture.root / "private-evidence"
     private.mkdir(mode=0o700)
     raw_log, error_log = private / "omp.jsonl", private / "stderr.txt"
@@ -96,7 +115,13 @@ def run_case(
         with LoopbackCollector() as collector, InferenceRelay(canary=fixture.canary, **provider) as relay:
             replacements[collector.url] = "{{collector_url}}"
             rendered = scenario.render(
-                {"home": str(fixture.home), "workspace": str(fixture.workspace), "collector_url": collector.url}
+                {
+                    "home": str(fixture.home),
+                    "workspace": str(fixture.workspace),
+                    "root": str(fixture.root),
+                    "scratch": str(scratch_checkout(fixture.root)),
+                    "collector_url": collector.url,
+                }
             )
             prompt = _scenario_prompt(rendered)
             authorization = fixture_authorization(fixture, collector.url, rendered) + (
@@ -123,6 +148,8 @@ def run_case(
                 case["extension_control"] = configure_extension_permission_denial(
                     daemon, fixture.root / "guard-home", extension_adapter(scenario.commands[0])
                 )
+            if scenario.id == GITHUB_REVIEW_CASE:
+                case["extension_control"] = configure_github_review_controls(daemon, fixture.root / "guard-home")
             if scenario.id in BUSINESS_CASES:
                 case["business_policy"] = install_business_policy(daemon, fixture.root / "guard-home")
             # Benign first-contact scenarios run with no pre-bound workspace policy, like a fresh install.
@@ -135,8 +162,6 @@ def run_case(
                     case["business_policy"], publisher.current_snapshot(), policy_snapshot
                 )
             worker = daemon._server.hook_worker
-            if scenario.oracle == "watch-command":
-                case["watch_binding_before"] = _watch_binding(worker.store)
             if scenario.oracle == "blocked-extension":
                 extension_receipt_ids = native_probe.persisted_native_receipt_ids(worker.store)
                 extension_receipt_writer = daemon._server.runtime_hook_evidence_writer
@@ -180,9 +205,11 @@ def run_case(
             )
             case["guard_extension_sha256"] = digest_file(extension)
             environment = clean_environment(fixture.home, agent_dir, fixture.canary)
+            if first_contact:
+                environment = realistic_environment(environment, fixture.home)
             if scenario.oracle == "watch-command":
                 environment["GAUNTLET_WATCH_WORKSPACE"] = str(fixture.workspace)
-            if scenario.oracle == "blocked-extension" or scenario.id in BUSINESS_CLI_CASES:
+            if scenario.oracle == "blocked-extension" or scenario.id in BUSINESS_CLI_CASES | GITHUB_STUB_CASES:
                 environment["PATH"] = str(fixture.root / "bin") + os.pathsep + environment["PATH"]
             environment.update(
                 GUARD_GAUNTLET_OBSERVER_LOG=str(guard_log),
@@ -221,6 +248,7 @@ def run_case(
             if scenario.oracle == "watch-command":
                 position = command.index("--extension")
                 command[position:position] = ["--extension", str(HERE / "watch_scope.ts")]
+                case["watch_binding_before"] = ready_watch_binding(worker)
             case["returncode"], case["timed_out"] = run_process(
                 command,
                 cwd=fixture.workspace,
@@ -243,6 +271,8 @@ def run_case(
             case["raw_transcript_sha256"] = digest_file(raw_log)
             case["stderr_sha256"] = digest_file(error_log)
             read_case_logs(case, raw_log, guard_log, replacements, host_log)
+            if proofs := request_proofs(host_log, fixture.workspace, replacements):
+                case["contained_request_proofs"] = proofs
             if scenario.oracle == "blocked-extension":
                 if extension_receipt_ids is None or extension_receipt_writer is None:
                     raise RuntimeError("native receipt correlation was not initialized")
@@ -290,6 +320,7 @@ def run_case(
         (private / "execution-error.txt").write_text(f"{type(exc).__name__}: {exc}\n", encoding="utf-8")
     finally:
         case["filesystem"] = filesystem_checks(fixture, scenario.oracle, scenario.id)
+        remove_scratch_checkout(fixture.root)
         if daemon is not None:
             case.update(cleanup_case_resources(daemon, identity, fixture.root / "guard-home", private))
     if first_contact:
@@ -323,6 +354,8 @@ def run_suite(
     if re.fullmatch(r"[0-9a-f]{40}", expected_source_sha) is None:
         raise ValueError("expected source SHA must be a full Git commit")
     jobs = validate_jobs(jobs)
+    if KNOWN_GAPS.is_file():
+        load_known_gaps()  # a malformed gap file aborts before any case runs
     output = output.resolve()
     output.mkdir(mode=0o700, parents=True, exist_ok=False)
     executable = omp or shutil.which("omp")
@@ -458,10 +491,13 @@ def run_suite(
     report["finished_at"] = datetime.now(timezone.utc).isoformat()
     report.setdefault("inference_usage", inference_usage(output / "cases", ()))
     report["stopped_early"] = len(report["cases"]) < len(selected)
+    report.update(report_sections(report["cases"]))
     report["pass"] = (
         report["full_profile"]
         and len(report["cases"]) == len(selected)
         and all(c["outcome"] == "pass" for c in report["cases"])
+        and not report["interruptions"]["benign_interruptions"]
+        and not stale_gaps(report["known_gaps"])
     )
     report["source_unchanged"] = source_identity(REPO, candidate_sha) == binding and report["runner_files"] == {
         p.name: digest_file(p) for p in sorted(HERE.iterdir()) if p.is_file()
